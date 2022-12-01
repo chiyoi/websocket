@@ -8,30 +8,26 @@ import (
 	"time"
 )
 
-func TestConnect(t *testing.T) {
-	ws, err := Dial("ws://localhost:12394/")
+func TestDial(t *testing.T) {
+	ws, err := Dial("wss://neko03.moe/")
 	if err != nil {
-		t.Error(err)
+		Info(err)
 	}
-	t.Log(ws.State())
-
-	ws, err = Dial("wss://www.neko03.com/")
+	Info(ws)
+	ws, err = Dial("ws://neko03.moe/")
 	if err != nil {
-		t.Error(err)
+		Info(err)
 	}
-	t.Log(ws.State())
+	Info(ws)
 
 	c := Dialer{
-		Origin:     "http://localhost/",
-		Protocol:   nil,
-		Extensions: nil,
-		Body:       io.NopCloser(strings.NewReader("neko nyan nyan")),
+		Body: io.NopCloser(strings.NewReader("neko nyan nyan")),
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
-	ws, err = c.DialContext(ctx, "ws://localhost:12394/")
+	ws, err = c.DialContext(ctx, "")
 	if err != nil {
-		t.Error(err)
+		Info(err)
 	}
-	t.Log(ws.State())
+	Info(ws)
 }

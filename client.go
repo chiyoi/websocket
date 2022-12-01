@@ -10,21 +10,19 @@ import (
 	"net"
 	"net/http"
 	urlpkg "net/url"
-	"sync"
 )
 
+// NetDialer can hold net.Dialer or tls.Dialer
 type NetDialer interface {
 	Dial(network string, addr string) (net.Conn, error)
 	DialContext(ctx context.Context, network string, addr string) (net.Conn, error)
 }
 
 // Dialer contains the config to start a websocket connection.
-// It stores some intermediate variables during connecting,
-// so it's better not to call it concurrently.
 type Dialer struct {
 	// Origin should be contained for a web browser.
 	Origin string
-	// Protocol is the sub-protocols wish to use.
+	// Protocol contains the sub-protocols to use.
 	// server may choose one or none from them.
 	Protocol []string
 	// Extensions are websocket extensions to use.
@@ -33,17 +31,14 @@ type Dialer struct {
 
 	// Header contains original headers in the handshake request.
 	Header http.Header
-	// Body is the body for handshake request. Usually empty.
+	// Body will be sent to server on handshake
 	Body io.ReadCloser
+	// ContentLength is the length of Dialer.Body
+	ContentLength int64
 
-	// Dialer is the net dialer for connect,
-	// tls.Dialer will be used for "wss" scheme and net.Dialer for "ws".
-	// Set to a tls.Dialer with expected tls.Config if necessary.
-	Dialer NetDialer
-
-	mu  sync.Mutex
-	ctx context.Context
-	url *urlpkg.URL
+	// NetDialer is the net dialer for connect,
+	// defaults to tls.NetDialer for "wss" scheme and net.NetDialer for "ws".
+	NetDialer NetDialer
 }
 
 // DialContext starts a websocket connection to the url using provided context,
@@ -52,14 +47,13 @@ type Dialer struct {
 func (d *Dialer) DialContext(ctx context.Context, url string) (ws WebSocket, err error) {
 	defer func() {
 		if err != nil {
-			err = fmt.Errorf("websocket: dial error: %w", err)
+			err = fmt.Errorf("websocket: dial: %w", err)
 		}
 	}()
 	if ctx == nil {
 		err = errors.New("nil context")
 		return
 	}
-	d.ctx = ctx
 
 	u, err := urlpkg.Parse(url)
 	if err != nil {
@@ -70,9 +64,8 @@ func (d *Dialer) DialContext(ctx context.Context, url string) (ws WebSocket, err
 	if err = VerifyURI(u.String()); err != nil {
 		return
 	}
-	d.url = u
 
-	nd := d.Dialer
+	nd := d.NetDialer
 	if nd == nil {
 		if u.Scheme == "wss" {
 			nd = new(tls.Dialer)
@@ -86,27 +79,7 @@ func (d *Dialer) DialContext(ctx context.Context, url string) (ws WebSocket, err
 		return
 	}
 
-	if ws, err = d.handshake(conn); err != nil {
-		return
-	}
-
-	return
-}
-
-func fillHost(url *urlpkg.URL) {
-	if url.Scheme == "" {
-		url.Scheme = "ws"
-	}
-	if p, ok := PortMap[url.Scheme]; ok {
-		hostname, port := url.Hostname(), url.Port()
-		if hostname == "" {
-			hostname = "localhost"
-		}
-		if port == "" {
-			port = p
-		}
-		url.Host = hostname + ":" + port
-	}
+	return d.handshake(conn, u)
 }
 
 // Dial calls DialContext with background context.
@@ -114,9 +87,28 @@ func (d *Dialer) Dial(url string) (ws WebSocket, err error) {
 	return d.DialContext(context.Background(), url)
 }
 
-func (d *Dialer) handshake(conn net.Conn) (WebSocket, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+func fillHost(u *urlpkg.URL) {
+	if u.Scheme == "" {
+		u.Scheme = "ws"
+	}
+	if p, ok := PortMap[u.Scheme]; ok {
+		hostname, port := u.Hostname(), u.Port()
+		if hostname == "" {
+			hostname = "localhost"
+		}
+		if port == "" {
+			port = p
+		}
+		u.Host = hostname + ":" + port
+	}
+}
+
+func (d *Dialer) handshake(conn net.Conn, u *urlpkg.URL) (ws WebSocket, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("handshake: %w", err)
+		}
+	}()
 	wsKey, accKey := genWsKeyPair()
 
 	h := d.Header.Clone()
@@ -140,35 +132,32 @@ func (d *Dialer) handshake(conn net.Conn) (WebSocket, error) {
 	}
 
 	req := &http.Request{
-		Method:           "GET",
-		URL:              d.url,
-		Proto:            "HTTP/1.1",
-		ProtoMajor:       1,
-		ProtoMinor:       1,
-		Host:             d.url.Host,
-		Header:           h,
-		Body:             d.Body,
-		TransferEncoding: []string{"identity"},
+		Method:        "GET",
+		URL:           u,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Host:          u.Host,
+		Header:        h,
+		Body:          d.Body,
+		ContentLength: d.ContentLength,
 	}
-	req = req.WithContext(d.ctx)
-
-	err := req.Write(conn)
-	if err != nil {
-		return nil, fmt.Errorf("request write error: %w", err)
+	if err = req.Write(conn); err != nil {
+		return
 	}
 
 	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	if err != nil {
-		return nil, fmt.Errorf("response read error: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusSwitchingProtocols {
-		return nil, errors.New("response status error: " + resp.Status)
+	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		if err == nil {
+			err = fmt.Errorf("invalid response status(got `%s`, expect `%03d %s`)", resp.Status, http.StatusSwitchingProtocols, http.StatusText(http.StatusSwitchingProtocols))
+		}
+		return
 	}
 
 	for k, v := range map[string]string{"Upgrade": "websocket", "Connection": "Upgrade", "Sec-WebSocket-Accept": accKey} {
 		if got := resp.Header.Get(k); got != v {
-			return nil, fmt.Errorf("request header |%s| error: got %s, expect %s", k, got, v)
+			err = fmt.Errorf("invalid response header |%s|(got %s, expect %s)", k, got, v)
+			return
 		}
 	}
 
@@ -178,7 +167,8 @@ func (d *Dialer) handshake(conn net.Conn) (WebSocket, error) {
 	}
 	for _, e := range resp.Header.Values("Sec-WebSocket-Extensions") {
 		if !eReq[e] {
-			return nil, errors.New("response with unsupported extension: " + e)
+			err = fmt.Errorf("response with unsupported extension(%s)", e)
+			return
 		}
 	}
 
@@ -194,16 +184,17 @@ func (d *Dialer) handshake(conn net.Conn) (WebSocket, error) {
 		}
 		return false
 	}() {
-		return nil, errors.New("response protocol not supported: " + pResp)
+		err = fmt.Errorf("response protocol not supported(%s)", pResp)
+		return
 	}
 
-	return &webSocket{
+	ws = &webSocket{
 		conn:  conn,
-		state: OPEN,
+		state: Open,
 		ext:   resp.Header.Values("Sec-WebSocket-Extensions"),
 		pro:   resp.Header.Get("Sec-WebSocket-Protocol"),
-		d:     map[Opcode][]byte{},
-	}, nil
+	}
+	return
 }
 
 var defaultDialer Dialer

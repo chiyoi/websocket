@@ -3,6 +3,8 @@ package websocket
 import (
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"sync"
 )
@@ -15,10 +17,15 @@ type ServerConfig struct {
 	// for each connection request, server should support all the client extensions.
 	Extensions []string
 
+	// Body will be sent to client on handshake
+	Body io.ReadCloser
+	// ContentLength is the length of ServerConfig.Body
+	ContentLength int64
+
 	mu sync.Mutex
 }
 
-// Hijack hijacks an existing http connection and returns a websocket connection
+// Hijack takes over an existing http connection and returns a websocket connection
 func (srv *ServerConfig) Hijack(w http.ResponseWriter, r *http.Request) (ws WebSocket, err error) {
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
@@ -32,10 +39,22 @@ func (srv *ServerConfig) Hijack(w http.ResponseWriter, r *http.Request) (ws WebS
 		err = errors.New("cannot take over connection")
 		return
 	}
+	conn, _, err := hi.Hijack()
+	if err != nil {
+		return
+	}
+	return srv.handshake(conn, r)
+}
 
+func (srv *ServerConfig) handshake(conn net.Conn, r *http.Request) (ws WebSocket, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("handshake: %w", err)
+		}
+	}()
 	for k, v := range map[string]string{"Upgrade": "websocket", "Connection": "Upgrade", "Sec-WebSocket-Version": "13"} {
 		if got := r.Header.Get(k); got != v {
-			err = fmt.Errorf("request header |%s| error: got %s, expect %s", k, got, v)
+			err = fmt.Errorf("invalid request header |%s|(got %s, expect %s)", k, got, v)
 			return
 		}
 	}
@@ -46,7 +65,7 @@ func (srv *ServerConfig) Hijack(w http.ResponseWriter, r *http.Request) (ws WebS
 		}
 	}
 
-	h := w.Header()
+	h := http.Header{}
 	h.Set("Upgrade", "websocket")
 	h.Set("Connection", "Upgrade")
 	h.Set("Sec-WebSocket-Accept", challengeKey(r.Header.Get("Sec-WebSocket-Key")))
@@ -71,21 +90,29 @@ func (srv *ServerConfig) Hijack(w http.ResponseWriter, r *http.Request) (ws WebS
 			break
 		}
 	}
-	w.WriteHeader(http.StatusSwitchingProtocols)
 
-	conn, _, err := hi.Hijack()
-	if err != nil {
-		err = fmt.Errorf("hijacker error: %w", err)
+	resp := &http.Response{
+		Status:        fmt.Sprintf("%03d %s", http.StatusSwitchingProtocols, http.StatusText(http.StatusSwitchingProtocols)),
+		StatusCode:    http.StatusSwitchingProtocols,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        h,
+		Body:          srv.Body,
+		ContentLength: srv.ContentLength,
+		Request:       r,
+		TLS:           r.TLS,
+	}
+	if err = resp.Write(conn); err != nil {
 		return
 	}
 
 	ws = &webSocket{
 		conn:  conn,
 		srv:   true,
-		state: OPEN,
+		state: Open,
 		ext:   h.Values("Sec-WebSocket-Extensions"),
 		pro:   h.Get("Sec-WebSocket-Protocol"),
-		d:     map[Opcode][]byte{},
 	}
 	return
 }

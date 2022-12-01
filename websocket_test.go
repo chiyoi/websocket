@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,8 +12,9 @@ import (
 )
 
 var (
-	Error = log.New(os.Stderr, "[ERROR] ", log.LstdFlags|log.Lshortfile|log.Lmsgprefix).Panicln
+	Error = log.New(os.Stderr, "[ERROR] ", log.LstdFlags|log.Lshortfile|log.Lmsgprefix).Println
 	Info  = log.New(os.Stdout, "[INFO] ", log.LstdFlags|log.Lshortfile|log.Lmsgprefix).Println
+	Debug = log.New(os.Stdout, "[DEBUG] ", log.LstdFlags|log.Lshortfile|log.Lmsgprefix).Println
 )
 
 func TestPing(t *testing.T) {
@@ -22,12 +24,9 @@ func TestPing(t *testing.T) {
 			Error(err)
 			return
 		}
-		defer func(ws WebSocket) {
-			err = ws.Close()
-			if err != nil {
-				Info("server close:", err)
-			}
-		}(ws)
+		defer func() {
+			Info("server close:", ws.Close())
+		}()
 		Info("server:", ws.State())
 
 		for i := 2; i > 0; i-- {
@@ -48,12 +47,9 @@ func TestPing(t *testing.T) {
 	if err != nil {
 		Error(err)
 	}
-	defer func(ws WebSocket) {
-		err = ws.Close()
-		if err != nil {
-			Info("client close:", err)
-		}
-	}(ws)
+	defer func() {
+		Info("client close:", ws.Close())
+	}()
 	Info("client:", ws.State())
 
 	for {
@@ -74,6 +70,7 @@ func TestPing(t *testing.T) {
 }
 
 func TestMessage(t *testing.T) {
+	var ch = make(chan int, 1)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		ws, err := Hijack(w, r)
 		if err != nil {
@@ -94,6 +91,8 @@ func TestMessage(t *testing.T) {
 		Info("server received:", string(resp))
 
 		var msg = strings.Repeat("nacho ", 10000)
+		ch <- len(msg)
+		Info("server send length:", len(msg))
 		if err = ws.SendText(msg); err != nil {
 			Error("server error:", err)
 			return
@@ -108,8 +107,8 @@ func TestMessage(t *testing.T) {
 	}
 	Info("server:", ws.State())
 
-	var rev []byte
-	if rev, err = ws.Recv(); err != nil {
+	rev, err := ws.Recv()
+	if err != nil {
 		Error("client error:", err)
 		return
 	}
@@ -120,11 +119,17 @@ func TestMessage(t *testing.T) {
 		return
 	}
 
-	if rev, err = ws.Recv(); err != nil {
+	rev, meta, err := ws.RecvCtx(context.Background())
+	if err != nil {
 		Error("client error:", err)
 		return
 	}
-	Info("client received:", string(rev))
+	Debug("meta:", meta)
+	l := <-ch
+	Info("client received length:", len(rev))
+	if l != len(rev) {
+		t.Error("length mismatched")
+	}
 	time.Sleep(time.Second)
 }
 
@@ -144,6 +149,6 @@ func TestAbnormalClosure(t *testing.T) {
 	go ws.Recv()
 
 	err = ws.Close()
-	Error(fmt.Sprintf("%T, %v\n", err, err))
-	Error(err.(ConnectionCloseError).Msg)
+	Info(fmt.Sprintf("%T, %v\n", err, err))
+	Info(err.(ConnectionCloseError).Msg())
 }
