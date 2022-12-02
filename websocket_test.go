@@ -97,7 +97,7 @@ func TestMessage(t *testing.T) {
 
 		var msg = strings.Repeat("nacho ", 10000)
 		ch <- len(msg)
-		Info("server send length:", len(msg))
+		Info("server sent length:", len(msg))
 		if err = ws.SendText(msg); err != nil {
 			Error("server error:", err)
 			return
@@ -129,10 +129,10 @@ func TestMessage(t *testing.T) {
 		Error("client error:", err)
 		return
 	}
-	Debug("msg.Op, msg.Len:", msg.Op, msg.Len)
+	Info("msg.Op, msg.Len:", msg.Op, msg.Len)
 	l := <-ch
-	Info("client received length:", len(rev))
-	if l != len(rev) {
+	Info("client received length:", len(msg.Data))
+	if l != len(msg.Data) {
 		t.Error("length mismatched")
 	}
 	time.Sleep(time.Second)
