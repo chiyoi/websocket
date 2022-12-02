@@ -16,7 +16,7 @@ type ServerConfig struct {
 	Extensions []string
 }
 
-// Upgrade takes over an existing http connection and returns a websocket connection
+// Upgrade takes over an existing http context and returns a websocket connection
 func (srv *ServerConfig) Upgrade(w http.ResponseWriter, r *http.Request) (ws WebSocket, err error) {
 	defer func() {
 		if err != nil {
@@ -104,9 +104,9 @@ func (srv *ServerConfig) handshake(conn net.Conn, r *http.Request) (ws WebSocket
 	return
 }
 
-var defaultServerConfig ServerConfig
-var DefaultServerConfig = &defaultServerConfig
+var DefaultServerConfig = &ServerConfig{}
 
-func Upgrade(w http.ResponseWriter, r *http.Request) (WebSocket, error) {
+// Upgrade upgrades the existing http context using DefaultServerConfig.
+func Upgrade(w http.ResponseWriter, r *http.Request) (ws WebSocket, err error) {
 	return DefaultServerConfig.Upgrade(w, r)
 }

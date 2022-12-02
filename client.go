@@ -11,7 +11,7 @@ import (
 	urlpkg "net/url"
 )
 
-// NetDialer can hold net.Dialer or tls.Dialer
+// NetDialer can hold net.Dialer or tls.Dialer.
 type NetDialer interface {
 	Dial(network string, addr string) (net.Conn, error)
 	DialContext(ctx context.Context, network string, addr string) (net.Conn, error)
@@ -31,13 +31,12 @@ type Dialer struct {
 	// Header contains original headers in the handshake request.
 	Header http.Header
 
-	// NetDialer is the net dialer for connect,
+	// NetDialer is the net dialer for the connection,
 	// defaults to tls.NetDialer for "wss" scheme and net.NetDialer for "ws".
 	NetDialer NetDialer
 }
 
-// DialContext starts a websocket connection to the url using provided context,
-// returns a WebSocket connection.
+// DialContext connects to the url using the provided context.
 // The provided context must be non-nil.
 func (d *Dialer) DialContext(ctx context.Context, url string) (ws WebSocket, err error) {
 	defer func() {
@@ -77,7 +76,7 @@ func (d *Dialer) DialContext(ctx context.Context, url string) (ws WebSocket, err
 	return d.handshake(conn, u)
 }
 
-// Dial calls DialContext with background context.
+// Dial connects to the url.
 func (d *Dialer) Dial(url string) (ws WebSocket, err error) {
 	return d.DialContext(context.Background(), url)
 }
@@ -190,8 +189,7 @@ func (d *Dialer) handshake(conn net.Conn, u *urlpkg.URL) (ws WebSocket, err erro
 	return
 }
 
-var defaultDialer Dialer
-var DefaultDialer = &defaultDialer
+var DefaultDialer = &Dialer{}
 
 // Dial connects to the url using DefaultDialer.
 func Dial(url string) (ws WebSocket, err error) {

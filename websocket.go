@@ -191,11 +191,6 @@ func (e timeoutError) Error() string {
 func (e timeoutError) Timeout() bool   { return true }
 func (e timeoutError) Temporary() bool { return true }
 
-const (
-	ErrReceiveTimeout timeoutError = "receive"
-	ErrSendTimeout    timeoutError = "send"
-)
-
 // ConnectionState indicates the connection state of a websocket connection.
 //
 // rfc 6455
@@ -469,7 +464,7 @@ func (ws *webSocket) rmuLockCtx(ctx context.Context) (err error) {
 	}()
 	select {
 	case <-ctx.Done():
-		return ErrReceiveTimeout
+		return timeoutError("receive")
 	case <-done:
 	}
 	return
@@ -487,7 +482,7 @@ func (ws *webSocket) recvCtxLocked(ctx context.Context) (msg Message, err error)
 		if err = cancelRead(ws.conn); err != nil {
 			return
 		}
-		err = ErrReceiveTimeout
+		err = timeoutError("receive")
 		return
 	case <-done:
 	}
@@ -641,7 +636,7 @@ func (ws *webSocket) wmuLockCtx(ctx context.Context) (err error) {
 	}()
 	select {
 	case <-ctx.Done():
-		err = ErrSendTimeout
+		err = timeoutError("send")
 		return
 	case <-done:
 	}
@@ -660,7 +655,7 @@ func (ws *webSocket) sendCtxLocked(ctx context.Context, msg Message) (err error)
 		if err = cancelWrite(ws.conn); err != nil {
 			return
 		}
-		err = ErrSendTimeout
+		err = timeoutError("send")
 		return
 	case <-done:
 	}
@@ -741,8 +736,8 @@ func (ws *webSocket) pong() (err error) {
 	})
 }
 
-// VerifyURI verifies whether provided uri
-// is a valid websocket uri.
+// VerifyURI verifies whether the provided uri is a valid websocket uri,
+// returns nil if it's valid.
 //
 // rfc 6455: section 3
 func VerifyURI(uri string) (err error) {
@@ -764,7 +759,6 @@ func VerifyURI(uri string) (err error) {
 	return
 }
 
-// rfc 6455: section 4.1
 func genWsKeyPair() (key, accept string) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
