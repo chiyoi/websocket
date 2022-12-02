@@ -2,8 +2,7 @@ package websocket
 
 import (
 	"context"
-	"io"
-	"strings"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -20,8 +19,19 @@ func TestDial(t *testing.T) {
 	}
 	Info(ws)
 
+	go http.ListenAndServe("", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := Upgrade(w, r)
+		if err != nil {
+			Info(err)
+		}
+		Info(ws)
+	}))
+	time.Sleep(time.Second * 2)
 	c := Dialer{
-		Body: io.NopCloser(strings.NewReader("neko nyan nyan")),
+		Extensions: []string{"nacho"},
+		Header: map[string][]string{
+			"Neko": {"nyan"},
+		},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()

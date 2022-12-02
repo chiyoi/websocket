@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	urlpkg "net/url"
@@ -31,10 +30,6 @@ type Dialer struct {
 
 	// Header contains original headers in the handshake request.
 	Header http.Header
-	// Body will be sent to server on handshake
-	Body io.ReadCloser
-	// ContentLength is the length of Dialer.Body
-	ContentLength int64
 
 	// NetDialer is the net dialer for connect,
 	// defaults to tls.NetDialer for "wss" scheme and net.NetDialer for "ws".
@@ -132,15 +127,13 @@ func (d *Dialer) handshake(conn net.Conn, u *urlpkg.URL) (ws WebSocket, err erro
 	}
 
 	req := &http.Request{
-		Method:        "GET",
-		URL:           u,
-		Proto:         "HTTP/1.1",
-		ProtoMajor:    1,
-		ProtoMinor:    1,
-		Host:          u.Host,
-		Header:        h,
-		Body:          d.Body,
-		ContentLength: d.ContentLength,
+		Method:     "GET",
+		URL:        u,
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Host:       u.Host,
+		Header:     h,
 	}
 	if err = req.Write(conn); err != nil {
 		return

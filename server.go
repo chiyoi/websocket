@@ -3,10 +3,8 @@ package websocket
 import (
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"sync"
 )
 
 type ServerConfig struct {
@@ -16,22 +14,13 @@ type ServerConfig struct {
 	// Extensions contains extensions the server support.
 	// for each connection request, server should support all the client extensions.
 	Extensions []string
-
-	// Body will be sent to client on handshake
-	Body io.ReadCloser
-	// ContentLength is the length of ServerConfig.Body
-	ContentLength int64
-
-	mu sync.Mutex
 }
 
-// Hijack takes over an existing http connection and returns a websocket connection
-func (srv *ServerConfig) Hijack(w http.ResponseWriter, r *http.Request) (ws WebSocket, err error) {
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
+// Upgrade takes over an existing http connection and returns a websocket connection
+func (srv *ServerConfig) Upgrade(w http.ResponseWriter, r *http.Request) (ws WebSocket, err error) {
 	defer func() {
 		if err != nil {
-			err = fmt.Errorf("websocket: hijack error: %w", err)
+			err = fmt.Errorf("websocket: upgrade: %w", err)
 		}
 	}()
 	hi, ok := w.(http.Hijacker)
@@ -92,16 +81,14 @@ func (srv *ServerConfig) handshake(conn net.Conn, r *http.Request) (ws WebSocket
 	}
 
 	resp := &http.Response{
-		Status:        fmt.Sprintf("%03d %s", http.StatusSwitchingProtocols, http.StatusText(http.StatusSwitchingProtocols)),
-		StatusCode:    http.StatusSwitchingProtocols,
-		Proto:         "HTTP/1.1",
-		ProtoMajor:    1,
-		ProtoMinor:    1,
-		Header:        h,
-		Body:          srv.Body,
-		ContentLength: srv.ContentLength,
-		Request:       r,
-		TLS:           r.TLS,
+		Status:     fmt.Sprintf("%03d %s", http.StatusSwitchingProtocols, http.StatusText(http.StatusSwitchingProtocols)),
+		StatusCode: http.StatusSwitchingProtocols,
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     h,
+		Request:    r,
+		TLS:        r.TLS,
 	}
 	if err = resp.Write(conn); err != nil {
 		return
@@ -120,6 +107,6 @@ func (srv *ServerConfig) handshake(conn net.Conn, r *http.Request) (ws WebSocket
 var defaultServerConfig ServerConfig
 var DefaultServerConfig = &defaultServerConfig
 
-func Hijack(w http.ResponseWriter, r *http.Request) (WebSocket, error) {
-	return DefaultServerConfig.Hijack(w, r)
+func Upgrade(w http.ResponseWriter, r *http.Request) (WebSocket, error) {
+	return DefaultServerConfig.Upgrade(w, r)
 }

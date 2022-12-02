@@ -26,27 +26,31 @@ type WebSocket interface {
 	// Protocol returns the sub-protocol used by the websocket connection.
 	Protocol() string
 
-	// RecvCtx waits for a websocket frame, parses it and returns the frame body.
+	// RecvCtx waits for a websocket message, and parses it into Message.
 	// Frames with OpPing will be responded with a frame with OpPong.
 	// Frames with OpConnectionClose will be responded and packed as ConnectionCloseError.
-	RecvCtx(ctx context.Context) (data []byte, meta Metadata, err error)
-	// Recv calls WebSocket.RecvCtx with context.Background(), while discards the metadata of received frame.
+	RecvCtx(ctx context.Context) (msg Message, err error)
+	// Recv works like WebSocket.RecvCtx but discards the frame metadata.
 	Recv() (data []byte, err error)
 
-	// SendCtx sends a frame to WebSocket
-	SendCtx(ctx context.Context, op Opcode, data []byte) (err error)
-	// Send calls WebSocket.SendCtx to send a frame with OpBinaryFrame with context.Background().
+	// SendCtx sends a message to the connection.
+	SendCtx(ctx context.Context, msg Message) (err error)
+	// Send sends a message with OpBinaryFrame to the connection.
 	Send(data []byte) (err error)
-	// SendText calls WebSocket.SendCtx to send a frame with OpTextFrame with context.Background().
+	// SendText sends a message with OpTextFrame to the connection.
 	SendText(txt string) (err error)
-	// Ping sends a frame with OpPing to WebSocket and waits for the next frame, typically a frame with OpPong.
+	// Ping sends a frame with OpPing to the connection and waits for the next frame,
+	// typically a frame with OpPong, parses it and returns its body.
 	Ping() (resp []byte, err error)
 
-	// Close sends close frame, waits for the response and closes the underlying
+	// Close sends a frame with OpConnectionClose, waits for the response and closes the underlying
 	// net.Conn. It does nothing if WebSocket is already closed or is closing.
 	Close() (err error)
 }
 
+// Opcode indicates the operation of a websocket frame.
+//
+// rfc 6455: section 5.2
 type Opcode uint8
 
 const (
@@ -62,31 +66,43 @@ const (
 func (op Opcode) String() string {
 	switch op {
 	case OpContinuationFrame:
-		return "continuation frame"
+		return "Opcode(continuation frame)"
 	case OpTextFrame:
-		return "text frame"
+		return "Opcode(text frame)"
 	case OpBinaryFrame:
-		return "binary frame"
+		return "Opcode(binary frame)"
 	case OpConnectionClose:
-		return "connection"
+		return "Opcode(connection)"
 	case OpPing:
-		return "ping"
+		return "Opcode(ping)"
 	case OpPong:
-		return "pong"
+		return "Opcode(pong)"
 	default:
-		return "invalid operation code"
+		return "Opcode(invalid operation)"
 	}
 }
 
-type Metadata struct {
-	Fin        bool
-	Rsv        [3]bool
-	Op         Opcode
-	Masked     bool
-	PayloadLen int64
-	Mask       []byte
+// Message is a websocket message.
+// To send a message, the Message.Len will be calculated from Message.Data and
+// the original value will be discarded.
+//
+// rfc 6455: section 1.2
+type Message struct {
+	// Op is the Opcode of the message(the Opcode of the first frame).
+	//
+	// rfc 6455: section 5.2
+	Op Opcode
+	// Len indicates the content-length of the message(the total payload length of all frames).
+	Len int64
+
+	// Data is the message content(concatenate the payload of all frames).
+	Data []byte
 }
 
+// CloseCode indicates the close status of a closed websocket connection,
+// call CloseCode.String() to get the status text.
+//
+// rfc 6455: section 7.4
 type CloseCode uint16
 
 const (
@@ -140,6 +156,7 @@ var PortMap = map[string]string{
 	"wss": "443",
 }
 
+// ConnectionCloseError contains all about an error caused by connection close.
 type ConnectionCloseError interface {
 	net.Error
 	Code() CloseCode
@@ -179,6 +196,9 @@ const (
 	ErrSendTimeout    timeoutError = "send"
 )
 
+// ConnectionState indicates the connection state of a websocket connection.
+//
+// rfc 6455
 type ConnectionState int
 
 const (
@@ -254,7 +274,7 @@ func (ws *webSocket) CloseCode(code CloseCode) (err error) {
 		return
 	}
 
-	_, _, err = ws.recvCtxLocked(ctx)
+	_, err = ws.recvCtxLocked(ctx)
 	return
 }
 func (ws *webSocket) Close() (err error) {
@@ -274,61 +294,63 @@ func (ws *webSocket) read(length int) (data []byte, err error) {
 	}
 	return
 }
-func (ws *webSocket) readMetadata() (meta Metadata, err error) {
+func (ws *webSocket) readMetadata() (fin bool, op Opcode, payloadLen int64, mask []byte, err error) {
 	metadata, err := ws.read(2)
 	if err != nil {
 		return
 	}
 
-	meta.Fin, meta.Rsv[0], meta.Rsv[1], meta.Rsv[2], meta.Op, meta.Masked, meta.PayloadLen = metadata[0]&0x80 != 0, metadata[0]&0x40 != 0, metadata[0]&0x20 != 0, metadata[0]&0x10 != 0, Opcode(metadata[0]&0x0f), metadata[1]&0x80 != 0, int64(metadata[1]&0x7f)
-	if meta.Rsv[0] || meta.Rsv[1] || meta.Rsv[2] {
-		err = errors.New("rsv bits are set")
+	var rsv [3]bool
+	var masked bool
+	fin, rsv[0], rsv[1], rsv[2], op, masked, payloadLen = metadata[0]&0x80 != 0, metadata[0]&0x40 != 0, metadata[0]&0x20 != 0, metadata[0]&0x10 != 0, Opcode(metadata[0]&0x0f), metadata[1]&0x80 != 0, int64(metadata[1]&0x7f)
+	if rsv[0] || rsv[1] || rsv[2] {
+		err = errors.New("some of rsv bits are set")
 		return
 	}
-	if ws.srv && !meta.Masked {
+	if ws.srv && !masked {
 		err = errors.New("server received unmasked frame")
 		return
-	} else if !ws.srv && meta.Masked {
+	} else if !ws.srv && masked {
 		err = errors.New("client received masked frame")
 		return
 	}
 
-	switch meta.PayloadLen {
+	switch payloadLen {
 	case 126:
 		var ext []byte
 		if ext, err = ws.read(2); err != nil {
 			return
 		}
-		meta.PayloadLen = int64(ext[0])<<8 + int64(ext[1])
+		payloadLen = int64(ext[0])<<8 + int64(ext[1])
 	case 127:
 		var ext []byte
 		if ext, err = ws.read(8); err != nil {
 			return
 		}
-		meta.PayloadLen = 0
+		payloadLen = 0
 		for i := 0; i < 8; i++ {
-			meta.PayloadLen += int64(int(ext[i]) << 8 * (7 - i))
+			payloadLen += int64(int(ext[i]) << 8 * (7 - i))
 		}
-		if meta.PayloadLen&0x80000000 != 0 {
+		if payloadLen&0x80000000 != 0 {
 			err = fmt.Errorf("received 8-byte payload length with the most significant bit set")
 			return
 		}
 	}
 
-	switch meta.Op {
+	switch op {
 	case OpConnectionClose, OpPing, OpPong:
-		if meta.PayloadLen > 125 {
+		if payloadLen > 125 {
 			err = errors.New("payload len too large for control frame")
 			return
 		}
-		if !meta.Fin {
+		if !fin {
 			err = errors.New("control frame is fragmented")
 			return
 		}
 	}
 
-	if meta.Masked {
-		if meta.Mask, err = ws.read(4); err != nil {
+	if masked {
+		if mask, err = ws.read(4); err != nil {
 			return
 		}
 	}
@@ -353,12 +375,14 @@ func (ws *webSocket) readPayload(payloadLen int64, mask []byte, verifyUTF8 bool)
 	}
 	return
 }
-func (ws *webSocket) receive() (data []byte, meta Metadata, err error) {
-	if meta, err = ws.readMetadata(); err != nil {
+func (ws *webSocket) receive() (msg Message, err error) {
+	fin, op, payloadLen, mask, err := ws.readMetadata()
+	if err != nil {
 		return
 	}
+	msg.Op, msg.Len = op, payloadLen
 
-	switch meta.Op {
+	switch op {
 	case OpContinuationFrame:
 		err = errors.New("received continuation frame as the first frame")
 		return
@@ -366,7 +390,7 @@ func (ws *webSocket) receive() (data []byte, meta Metadata, err error) {
 	case OpBinaryFrame:
 	case OpConnectionClose:
 		var p []byte
-		if p, err = ws.readPayload(meta.PayloadLen, meta.Mask, false); err != nil {
+		if p, err = ws.readPayload(payloadLen, mask, false); err != nil {
 			return
 		}
 
@@ -385,7 +409,7 @@ func (ws *webSocket) receive() (data []byte, meta Metadata, err error) {
 			panic(err)
 		}
 
-		if meta.PayloadLen < 2 {
+		if payloadLen < 2 {
 			err = &connectionCloseError{code: NoStatusReceived}
 			return
 		}
@@ -403,33 +427,32 @@ func (ws *webSocket) receive() (data []byte, meta Metadata, err error) {
 	}
 
 	var buf bytes.Buffer
-	verifyUTF8 := meta.Op == OpTextFrame
+	verifyUTF8 := op == OpTextFrame
 
-	p, err := ws.readPayload(meta.PayloadLen, meta.Mask, verifyUTF8)
+	p, err := ws.readPayload(payloadLen, mask, verifyUTF8)
 	if err != nil {
 		return
 	}
 	buf.Write(p)
 
-	var curr = meta
-	for !curr.Fin {
-		if curr, err = ws.readMetadata(); err != nil {
+	for !fin {
+		if fin, op, payloadLen, mask, err = ws.readMetadata(); err != nil {
 			return
 		}
-		meta.PayloadLen += curr.PayloadLen
+		msg.Len += payloadLen
 
-		if curr.Op != OpContinuationFrame {
+		if op != OpContinuationFrame {
 			err = errors.New("non-continuation frame following first frame")
 			return
 		}
 
-		if p, err = ws.readPayload(curr.PayloadLen, curr.Mask, verifyUTF8); err != nil {
+		if p, err = ws.readPayload(payloadLen, mask, verifyUTF8); err != nil {
 			return
 		}
 		buf.Write(p)
 	}
 
-	data = buf.Bytes()
+	msg.Data = buf.Bytes()
 	return
 }
 func (ws *webSocket) rmuLockCtx(ctx context.Context) (err error) {
@@ -451,11 +474,11 @@ func (ws *webSocket) rmuLockCtx(ctx context.Context) (err error) {
 	}
 	return
 }
-func (ws *webSocket) recvCtxLocked(ctx context.Context) (data []byte, meta Metadata, err error) {
+func (ws *webSocket) recvCtxLocked(ctx context.Context) (msg Message, err error) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if data, meta, err = ws.receive(); err != nil {
+		if msg, err = ws.receive(); err != nil {
 			return
 		}
 	}()
@@ -470,7 +493,7 @@ func (ws *webSocket) recvCtxLocked(ctx context.Context) (data []byte, meta Metad
 	}
 	return
 }
-func (ws *webSocket) RecvCtx(ctx context.Context) (data []byte, meta Metadata, err error) {
+func (ws *webSocket) RecvCtx(ctx context.Context) (msg Message, err error) {
 	defer func() {
 		if _, ok := err.(ConnectionCloseError); err != nil && !ok {
 			err = fmt.Errorf("websocket: receive error: %w", err)
@@ -492,7 +515,8 @@ func (ws *webSocket) RecvCtx(ctx context.Context) (data []byte, meta Metadata, e
 	return ws.recvCtxLocked(ctx)
 }
 func (ws *webSocket) Recv() (data []byte, err error) {
-	data, _, err = ws.RecvCtx(context.Background())
+	msg, err := ws.RecvCtx(context.Background())
+	data = msg.Data
 	return
 }
 
@@ -623,11 +647,11 @@ func (ws *webSocket) wmuLockCtx(ctx context.Context) (err error) {
 	}
 	return
 }
-func (ws *webSocket) sendCtxLocked(ctx context.Context, op Opcode, data []byte) (err error) {
+func (ws *webSocket) sendCtxLocked(ctx context.Context, msg Message) (err error) {
 	done := make(chan struct{})
 	go func() {
 		close(done)
-		if err = ws.send(op, data); err != nil {
+		if err = ws.send(msg.Op, msg.Data); err != nil {
 			return
 		}
 	}()
@@ -642,7 +666,7 @@ func (ws *webSocket) sendCtxLocked(ctx context.Context, op Opcode, data []byte) 
 	}
 	return
 }
-func (ws *webSocket) SendCtx(ctx context.Context, op Opcode, data []byte) (err error) {
+func (ws *webSocket) SendCtx(ctx context.Context, msg Message) (err error) {
 	defer func() {
 		if _, ok := err.(ConnectionCloseError); err != nil && !ok {
 			err = fmt.Errorf("websocket: send error: %w", err)
@@ -660,21 +684,30 @@ func (ws *webSocket) SendCtx(ctx context.Context, op Opcode, data []byte) (err e
 		return
 	}
 	defer ws.wmu.Unlock()
-	return ws.sendCtxLocked(ctx, op, data)
+	return ws.sendCtxLocked(ctx, msg)
 }
 
 func (ws *webSocket) Send(data []byte) (err error) {
-	return ws.SendCtx(context.Background(), OpBinaryFrame, data)
+	return ws.SendCtx(context.Background(), Message{
+		Op:   OpBinaryFrame,
+		Data: data,
+	})
 }
 func (ws *webSocket) SendText(txt string) (err error) {
-	return ws.SendCtx(context.Background(), OpTextFrame, []byte(txt))
+	return ws.SendCtx(context.Background(), Message{
+		Op:   OpTextFrame,
+		Data: []byte(txt),
+	})
 }
 
 func (ws *webSocket) sendCloseCtxLocked(ctx context.Context, code CloseCode) (err error) {
 	var buf bytes.Buffer
 	buf.WriteByte(byte(code >> 8 & 0xff))
 	buf.WriteByte(byte(code & 0xff))
-	return ws.sendCtxLocked(ctx, OpConnectionClose, buf.Bytes())
+	return ws.sendCtxLocked(ctx, Message{
+		Op:   OpConnectionClose,
+		Data: buf.Bytes(),
+	})
 }
 
 func (ws *webSocket) Ping() (resp []byte, err error) {
@@ -689,16 +722,23 @@ func (ws *webSocket) Ping() (resp []byte, err error) {
 		return
 	}
 	defer ws.rmu.Unlock()
-	if err = ws.sendCtxLocked(ctx, OpPing, []byte("ping")); err != nil {
+	if err = ws.sendCtxLocked(ctx, Message{
+		Op:   OpPing,
+		Data: []byte("ping"),
+	}); err != nil {
 		return
 	}
-	resp, _, err = ws.recvCtxLocked(ctx)
+	msg, err := ws.recvCtxLocked(ctx)
+	resp = msg.Data
 	return
 }
 func (ws *webSocket) pong() (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
-	return ws.SendCtx(ctx, OpPong, []byte("pong"))
+	return ws.SendCtx(ctx, Message{
+		Op:   OpPong,
+		Data: []byte("pong"),
+	})
 }
 
 // VerifyURI verifies whether provided uri

@@ -2,7 +2,6 @@ package websocket
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -19,7 +18,7 @@ var (
 
 func TestPing(t *testing.T) {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		ws, err := Hijack(w, r)
+		ws, err := Upgrade(w, r)
 		if err != nil {
 			Error(err)
 			return
@@ -48,7 +47,13 @@ func TestPing(t *testing.T) {
 		Error(err)
 	}
 	defer func() {
-		Info("client close:", ws.Close())
+		if err = ws.Close(); err != nil {
+			if _, ok := err.(ConnectionCloseError); ok {
+				Info("client close:", err)
+				return
+			}
+			Error("client error:", err)
+		}
 	}()
 	Info("client:", ws.State())
 
@@ -72,7 +77,7 @@ func TestPing(t *testing.T) {
 func TestMessage(t *testing.T) {
 	var ch = make(chan int, 1)
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		ws, err := Hijack(w, r)
+		ws, err := Upgrade(w, r)
 		if err != nil {
 			Error(err)
 		}
@@ -119,36 +124,16 @@ func TestMessage(t *testing.T) {
 		return
 	}
 
-	rev, meta, err := ws.RecvCtx(context.Background())
+	msg, err := ws.RecvCtx(context.Background())
 	if err != nil {
 		Error("client error:", err)
 		return
 	}
-	Debug("meta:", meta)
+	Debug("msg.Op, msg.Len:", msg.Op, msg.Len)
 	l := <-ch
 	Info("client received length:", len(rev))
 	if l != len(rev) {
 		t.Error("length mismatched")
 	}
 	time.Sleep(time.Second)
-}
-
-func TestAbnormalClosure(t *testing.T) {
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = Hijack(w, r)
-		select {}
-	})
-	go http.ListenAndServe("", nil)
-	time.Sleep(time.Second * 2)
-
-	ws, err := Dial("")
-	if err != nil {
-		Error(err)
-	}
-
-	go ws.Recv()
-
-	err = ws.Close()
-	Info(fmt.Sprintf("%T, %v\n", err, err))
-	Info(err.(ConnectionCloseError).Msg())
 }
