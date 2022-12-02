@@ -103,7 +103,10 @@ func (d *Dialer) handshake(conn net.Conn, u *urlpkg.URL) (ws WebSocket, err erro
 			err = fmt.Errorf("handshake: %w", err)
 		}
 	}()
-	wsKey, accKey := genWsKeyPair()
+	wsKey, accKey, err := genWsKeyPair()
+	if err != nil {
+		return
+	}
 
 	h := d.Header.Clone()
 	if h == nil {

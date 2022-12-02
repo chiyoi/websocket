@@ -17,37 +17,6 @@ import (
 	"unicode/utf8"
 )
 
-// WebSocket is a websocket connection.
-type WebSocket interface {
-	// State returns the state of the websocket connection.
-	State() ConnectionState
-	// Extensions returns extensions used by the websocket connection.
-	Extensions() []string
-	// Protocol returns the sub-protocol used by the websocket connection.
-	Protocol() string
-
-	// RecvCtx waits for a websocket message, and parses it into Message.
-	// Frames with OpPing will be responded with a frame with OpPong.
-	// Frames with OpConnectionClose will be responded and packed as ConnectionCloseError.
-	RecvCtx(ctx context.Context) (msg Message, err error)
-	// Recv works like WebSocket.RecvCtx but discards the frame metadata.
-	Recv() (data []byte, err error)
-
-	// SendCtx sends a message to the connection.
-	SendCtx(ctx context.Context, msg Message) (err error)
-	// Send sends a message with OpBinaryFrame to the connection.
-	Send(data []byte) (err error)
-	// SendText sends a message with OpTextFrame to the connection.
-	SendText(txt string) (err error)
-	// Ping sends a frame with OpPing to the connection and waits for the next frame,
-	// typically a frame with OpPong, parses it and returns its body.
-	Ping() (resp []byte, err error)
-
-	// Close sends a frame with OpConnectionClose, waits for the response and closes the underlying
-	// net.Conn. It does nothing if WebSocket is already closed or is closing.
-	Close() (err error)
-}
-
 // Opcode indicates the operation of a websocket frame.
 //
 // rfc 6455: section 5.2
@@ -63,22 +32,25 @@ const (
 	OpPong            Opcode = 0xa
 )
 
-func (op Opcode) String() string {
+func (op Opcode) String() (disp string) {
+	defer func() {
+		disp = fmt.Sprintf("Opcode(%s)", disp)
+	}()
 	switch op {
 	case OpContinuationFrame:
-		return "Opcode(continuation frame)"
+		return "continuation frame"
 	case OpTextFrame:
-		return "Opcode(text frame)"
+		return "text frame"
 	case OpBinaryFrame:
-		return "Opcode(binary frame)"
+		return "binary frame"
 	case OpConnectionClose:
-		return "Opcode(connection)"
+		return "connection"
 	case OpPing:
-		return "Opcode(ping)"
+		return "ping"
 	case OpPong:
-		return "Opcode(pong)"
+		return "pong"
 	default:
-		return "Opcode(invalid operation)"
+		return "invalid operation"
 	}
 }
 
@@ -164,55 +136,93 @@ type ConnectionCloseError interface {
 }
 
 type connectionCloseError struct {
-	code CloseCode
-	msg  any
+	code        CloseCode
+	msg         []byte
+	abnormalErr error
 }
 
 var _ ConnectionCloseError = (*connectionCloseError)(nil)
+var _ interface{ Unwarp() error } = (*connectionCloseError)(nil)
 
-func (e connectionCloseError) Error() string {
-	return fmt.Sprintf("connection close(%s)", e.code)
+func (err connectionCloseError) Error() string {
+	return fmt.Sprintf("connection close(%s)", err.code)
+}
+func (err connectionCloseError) Unwarp() error {
+	if err.abnormalErr != nil {
+		return err.abnormalErr
+	}
+	return err
 }
 
 func (connectionCloseError) Timeout() bool   { return false }
 func (connectionCloseError) Temporary() bool { return false }
 
-func (e connectionCloseError) Code() CloseCode { return e.code }
-func (e connectionCloseError) Msg() any        { return e.msg }
+func (err connectionCloseError) Code() CloseCode { return err.code }
+func (err connectionCloseError) Msg() any        { return err.msg }
 
-type timeoutError string
+type timeoutError struct {
+	action string
+}
 
 var _ net.Error = (*timeoutError)(nil)
 
-func (e timeoutError) Error() string {
-	return fmt.Sprintf("%s timeout", string(e))
+const (
+	actRecv = "receive"
+	actSend = "send"
+)
+
+func (err timeoutError) Error() string {
+	return fmt.Sprintf("%s timeout", string(err.action))
 }
 
-func (e timeoutError) Timeout() bool   { return true }
-func (e timeoutError) Temporary() bool { return true }
+func (err timeoutError) Timeout() bool   { return true }
+func (err timeoutError) Temporary() bool { return true }
 
 // ConnectionState indicates the connection state of a websocket connection.
 //
-// rfc 6455
-type ConnectionState int
+// rfc 6455: section 4
+type ConnectionState string
 
 const (
-	Connecting ConnectionState = iota
-	Open
-	Closed
+	Connecting ConnectionState = "CONNECTING"
+	Open       ConnectionState = "OPEN"
+	Closed     ConnectionState = "CLOSED"
 )
 
-func (s ConnectionState) String() string {
-	switch s {
-	case Connecting:
-		return "connecting"
-	case Open:
-		return "open"
-	case Closed:
-		return "closed"
-	default:
-		return "invalid state"
-	}
+var MaximumSegmentSize = 1024
+
+// WebSocket is a websocket connection.
+type WebSocket interface {
+	// State returns the state of the websocket connection.
+	State() ConnectionState
+	// Extensions returns extensions used by the websocket connection.
+	Extensions() []string
+	// Protocol returns the sub-protocol used by the websocket connection.
+	Protocol() string
+
+	// RecvCtx waits for a websocket message, and parses it into Message.
+	// Frames with OpPing will be responded with a frame with OpPong.
+	// When receiving a frame with OpConnectionClose, the close response
+	// will be sent and returns ConnectionCloseError instead of Message.
+	RecvCtx(ctx context.Context) (msg Message, err error)
+	// Recv works like WebSocket.RecvCtx but discards the frame metadata.
+	Recv() (data []byte, err error)
+
+	// SendCtx sends a message to the connection.
+	SendCtx(ctx context.Context, msg Message) (err error)
+	// Send sends a message with OpBinaryFrame to the connection.
+	Send(data []byte) (err error)
+	// SendText sends a message with OpTextFrame to the connection.
+	SendText(txt string) (err error)
+	// Ping sends a frame with OpPing to the connection and waits for the next frame,
+	// typically a frame with OpPong, parses it and returns its body.
+	Ping() (resp []byte, err error)
+
+	// Close sends a frame with OpConnectionClose, waits for the response and closes the underlying
+	// net.Conn. It does nothing if WebSocket is already closed or is closing.
+	// The return value is nil(when it does nothing) or ConnectCloseError. Unwarp to get the error
+	// occurred during closing(the close code must be AbnormalClosure in this case).
+	Close() (err error)
 }
 
 type webSocket struct {
@@ -238,16 +248,19 @@ func (ws *webSocket) close() (err error) {
 	ws.state = Closed
 	return ws.conn.Close()
 }
+
 func (ws *webSocket) CloseCode(code CloseCode) (err error) {
 	if ws.state != Open || !ws.closing.CompareAndSwap(false, true) {
 		return
 	}
 	defer func() {
 		if _, ok := err.(ConnectionCloseError); !ok {
-			_ = ws.close()
+			if closeErr := ws.close(); closeErr != nil {
+				err = closeErr
+			}
 			err = &connectionCloseError{
-				code: AbnormalClosure,
-				msg:  err,
+				code:        AbnormalClosure,
+				abnormalErr: err,
 			}
 		}
 	}()
@@ -260,18 +273,14 @@ func (ws *webSocket) CloseCode(code CloseCode) (err error) {
 	}
 	defer ws.rmu.Unlock()
 
-	if err = ws.wmuLockCtx(ctx); err != nil {
-		return
-	}
-	defer ws.wmu.Unlock()
-
-	if err = ws.sendCloseCtxLocked(ctx, code); err != nil {
+	if err = ws.sendCloseCtx(ctx, code); err != nil {
 		return
 	}
 
 	_, err = ws.recvCtxLocked(ctx)
 	return
 }
+
 func (ws *webSocket) Close() (err error) {
 	return ws.CloseCode(NormalClosure)
 }
@@ -289,6 +298,7 @@ func (ws *webSocket) read(length int) (data []byte, err error) {
 	}
 	return
 }
+
 func (ws *webSocket) readMetadata() (fin bool, op Opcode, payloadLen int64, mask []byte, err error) {
 	metadata, err := ws.read(2)
 	if err != nil {
@@ -351,6 +361,7 @@ func (ws *webSocket) readMetadata() (fin bool, op Opcode, payloadLen int64, mask
 	}
 	return
 }
+
 func (ws *webSocket) readPayload(payloadLen int64, mask []byte, verifyUTF8 bool) (data []byte, err error) {
 	if data, err = ws.read(int(payloadLen)); err != nil {
 		return
@@ -370,6 +381,7 @@ func (ws *webSocket) readPayload(payloadLen int64, mask []byte, verifyUTF8 bool)
 	}
 	return
 }
+
 func (ws *webSocket) receive() (msg Message, err error) {
 	fin, op, payloadLen, mask, err := ws.readMetadata()
 	if err != nil {
@@ -384,24 +396,23 @@ func (ws *webSocket) receive() (msg Message, err error) {
 	case OpTextFrame:
 	case OpBinaryFrame:
 	case OpConnectionClose:
-		var p []byte
-		if p, err = ws.readPayload(payloadLen, mask, false); err != nil {
+		if !ws.closing.CompareAndSwap(false, true) {
 			return
 		}
 
-		if ws.closing.CompareAndSwap(false, true) {
-			err = ws.wmuLockCtx(context.Background())
-			if err != nil {
-				return
-			}
-			defer ws.wmu.Unlock()
-			if err = ws.sendCloseCtxLocked(context.Background(), NormalClosure); err != nil {
-				return
-			}
+		var p []byte
+		if p, err = ws.readPayload(payloadLen, mask, false); err != nil {
+			err = &connectionCloseError{code: AbnormalClosure, abnormalErr: err}
+			return
+		}
+		if err = ws.sendCloseCtx(context.Background(), NormalClosure); err != nil {
+			err = &connectionCloseError{code: AbnormalClosure, abnormalErr: err}
+			return
 		}
 
-		if err := ws.close(); err != nil {
-			panic(err)
+		if err = ws.close(); err != nil {
+			err = &connectionCloseError{code: AbnormalClosure, abnormalErr: err}
+			return
 		}
 
 		if payloadLen < 2 {
@@ -409,8 +420,8 @@ func (ws *webSocket) receive() (msg Message, err error) {
 			return
 		}
 		err = &connectionCloseError{
-			CloseCode(uint16(p[0])<<8 + uint16(p[1])),
-			p[2:],
+			code: CloseCode(uint16(p[0])<<8 + uint16(p[1])),
+			msg:  p[2:],
 		}
 		return
 
@@ -450,6 +461,7 @@ func (ws *webSocket) receive() (msg Message, err error) {
 	msg.Data = buf.Bytes()
 	return
 }
+
 func (ws *webSocket) rmuLockCtx(ctx context.Context) (err error) {
 	done := make(chan struct{})
 	go func() {
@@ -464,11 +476,12 @@ func (ws *webSocket) rmuLockCtx(ctx context.Context) (err error) {
 	}()
 	select {
 	case <-ctx.Done():
-		return timeoutError("receive")
+		return timeoutError{actRecv}
 	case <-done:
 	}
 	return
 }
+
 func (ws *webSocket) recvCtxLocked(ctx context.Context) (msg Message, err error) {
 	done := make(chan struct{})
 	go func() {
@@ -482,12 +495,13 @@ func (ws *webSocket) recvCtxLocked(ctx context.Context) (msg Message, err error)
 		if err = cancelRead(ws.conn); err != nil {
 			return
 		}
-		err = timeoutError("receive")
+		err = timeoutError{actRecv}
 		return
 	case <-done:
 	}
 	return
 }
+
 func (ws *webSocket) RecvCtx(ctx context.Context) (msg Message, err error) {
 	defer func() {
 		if _, ok := err.(ConnectionCloseError); err != nil && !ok {
@@ -514,8 +528,6 @@ func (ws *webSocket) Recv() (data []byte, err error) {
 	data = msg.Data
 	return
 }
-
-var MaximumSegmentSize = 1024
 
 func (ws *webSocket) write(b []byte) (err error) {
 	if len(b) == 0 {
@@ -564,6 +576,7 @@ func (ws *webSocket) bufMetadata(buf *bytes.Buffer, fin bool, op Opcode, payload
 	}
 	return
 }
+
 func (ws *webSocket) bufPayload(buf *bytes.Buffer, data []byte, mask []byte) {
 	data = append(make([]byte, 0, len(data)), data...)
 	if mask != nil {
@@ -636,12 +649,13 @@ func (ws *webSocket) wmuLockCtx(ctx context.Context) (err error) {
 	}()
 	select {
 	case <-ctx.Done():
-		err = timeoutError("send")
+		err = timeoutError{actSend}
 		return
 	case <-done:
 	}
 	return
 }
+
 func (ws *webSocket) sendCtxLocked(ctx context.Context, msg Message) (err error) {
 	done := make(chan struct{})
 	go func() {
@@ -655,12 +669,13 @@ func (ws *webSocket) sendCtxLocked(ctx context.Context, msg Message) (err error)
 		if err = cancelWrite(ws.conn); err != nil {
 			return
 		}
-		err = timeoutError("send")
+		err = timeoutError{actSend}
 		return
 	case <-done:
 	}
 	return
 }
+
 func (ws *webSocket) SendCtx(ctx context.Context, msg Message) (err error) {
 	defer func() {
 		if _, ok := err.(ConnectionCloseError); err != nil && !ok {
@@ -688,6 +703,7 @@ func (ws *webSocket) Send(data []byte) (err error) {
 		Data: data,
 	})
 }
+
 func (ws *webSocket) SendText(txt string) (err error) {
 	return ws.SendCtx(context.Background(), Message{
 		Op:   OpTextFrame,
@@ -695,7 +711,11 @@ func (ws *webSocket) SendText(txt string) (err error) {
 	})
 }
 
-func (ws *webSocket) sendCloseCtxLocked(ctx context.Context, code CloseCode) (err error) {
+func (ws *webSocket) sendCloseCtx(ctx context.Context, code CloseCode) (err error) {
+	if err = ws.wmuLockCtx(ctx); err != nil {
+		return
+	}
+	defer ws.wmu.Unlock()
 	var buf bytes.Buffer
 	buf.WriteByte(byte(code >> 8 & 0xff))
 	buf.WriteByte(byte(code & 0xff))
@@ -727,6 +747,7 @@ func (ws *webSocket) Ping() (resp []byte, err error) {
 	resp = msg.Data
 	return
 }
+
 func (ws *webSocket) pong() (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
@@ -759,10 +780,10 @@ func VerifyURI(uri string) (err error) {
 	return
 }
 
-func genWsKeyPair() (key, accept string) {
+func genWsKeyPair() (key, accept string, err error) {
 	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic("websocket: random challenge key failed:" + err.Error())
+	if _, err = rand.Read(b); err != nil {
+		return
 	}
 	key = base64.StdEncoding.EncodeToString(b)
 
@@ -791,6 +812,7 @@ func cancelRead(conn net.Conn) (err error) {
 	}
 	return
 }
+
 func cancelWrite(conn net.Conn) (err error) {
 	if err = conn.SetWriteDeadline(time.Now().Add(-1)); err != nil {
 		return
