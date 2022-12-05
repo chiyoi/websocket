@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -24,7 +25,7 @@ func TestPing(t *testing.T) {
 			return
 		}
 		defer func() {
-			Info("server close:", ws.Close())
+			Info("server close:", ws.CloseMsg([]byte("nyan"), AbnormalClosure))
 		}()
 		Info("server:", ws.State())
 
@@ -50,6 +51,7 @@ func TestPing(t *testing.T) {
 		if err = ws.Close(); err != nil {
 			if _, ok := err.(ConnectionCloseError); ok {
 				Info("client close:", err)
+				runtime.Gosched()
 				return
 			}
 			Error("client error:", err)
@@ -61,8 +63,8 @@ func TestPing(t *testing.T) {
 		var rev []byte
 		rev, err = ws.Recv()
 		if err != nil {
-			if _, ok := err.(ConnectionCloseError); ok {
-				Info("client close:", err)
+			if cce, ok := err.(ConnectionCloseError); ok {
+				Info("client close:", string(cce.Msg()))
 				return
 			}
 			Error("client error:", err)

@@ -132,7 +132,7 @@ var PortMap = map[string]string{
 type ConnectionCloseError interface {
 	net.Error
 	Code() CloseCode
-	Msg() any
+	Msg() []byte
 }
 
 type connectionCloseError struct {
@@ -158,7 +158,7 @@ func (connectionCloseError) Timeout() bool   { return false }
 func (connectionCloseError) Temporary() bool { return false }
 
 func (err connectionCloseError) Code() CloseCode { return err.code }
-func (err connectionCloseError) Msg() any        { return err.msg }
+func (err connectionCloseError) Msg() []byte     { return err.msg }
 
 type timeoutError struct {
 	action string
@@ -218,10 +218,12 @@ type WebSocket interface {
 	// typically a frame with OpPong, parses it and returns its body.
 	Ping() (resp []byte, err error)
 
-	// Close sends a frame with OpConnectionClose, waits for the response and closes the underlying
+	// CloseMsg sends CloseCode and msg by a frame with OpConnectionClose, waits for the response and closes the underlying
 	// net.Conn. It does nothing if WebSocket is already closed or is closing.
 	// The return value is nil(when it does nothing) or ConnectCloseError. Unwarp to get the error
 	// occurred during closing(the close code must be AbnormalClosure in this case).
+	CloseMsg(msg []byte, code CloseCode) (err error)
+	// Close works like CloseMsg but with NormalClosure as CloseCode and NormalClosure.String() as msg.
 	Close() (err error)
 }
 
@@ -249,7 +251,7 @@ func (ws *webSocket) close() (err error) {
 	return ws.conn.Close()
 }
 
-func (ws *webSocket) CloseCode(code CloseCode) (err error) {
+func (ws *webSocket) CloseMsg(msg []byte, code CloseCode) (err error) {
 	if ws.state != Open || !ws.closing.CompareAndSwap(false, true) {
 		return
 	}
@@ -273,7 +275,7 @@ func (ws *webSocket) CloseCode(code CloseCode) (err error) {
 	}
 	defer ws.rmu.Unlock()
 
-	if err = ws.sendCloseCtx(ctx, code); err != nil {
+	if err = ws.sendCloseCtx(ctx, msg, code); err != nil {
 		return
 	}
 
@@ -282,7 +284,7 @@ func (ws *webSocket) CloseCode(code CloseCode) (err error) {
 }
 
 func (ws *webSocket) Close() (err error) {
-	return ws.CloseCode(NormalClosure)
+	return ws.CloseMsg([]byte(NormalClosure.String()), NormalClosure)
 }
 
 func (ws *webSocket) read(length int) (data []byte, err error) {
@@ -399,19 +401,23 @@ func (ws *webSocket) receive() (msg Message, err error) {
 		if !ws.closing.CompareAndSwap(false, true) {
 			return
 		}
+		defer func() {
+			if closeErr := ws.close(); closeErr != nil {
+				err = closeErr
+			}
+			if _, ok := err.(ConnectionCloseError); !ok {
+				err = &connectionCloseError{
+					code:        AbnormalClosure,
+					abnormalErr: err,
+				}
+			}
+		}()
 
 		var p []byte
 		if p, err = ws.readPayload(payloadLen, mask, false); err != nil {
-			err = &connectionCloseError{code: AbnormalClosure, abnormalErr: err}
 			return
 		}
-		if err = ws.sendCloseCtx(context.Background(), NormalClosure); err != nil {
-			err = &connectionCloseError{code: AbnormalClosure, abnormalErr: err}
-			return
-		}
-
-		if err = ws.close(); err != nil {
-			err = &connectionCloseError{code: AbnormalClosure, abnormalErr: err}
+		if err = ws.sendCloseCtx(context.Background(), []byte(NormalClosure.String()), NormalClosure); err != nil {
 			return
 		}
 
@@ -711,7 +717,7 @@ func (ws *webSocket) SendText(txt string) (err error) {
 	})
 }
 
-func (ws *webSocket) sendCloseCtx(ctx context.Context, code CloseCode) (err error) {
+func (ws *webSocket) sendCloseCtx(ctx context.Context, msg []byte, code CloseCode) (err error) {
 	if err = ws.wmuLockCtx(ctx); err != nil {
 		return
 	}
@@ -719,6 +725,7 @@ func (ws *webSocket) sendCloseCtx(ctx context.Context, code CloseCode) (err erro
 	var buf bytes.Buffer
 	buf.WriteByte(byte(code >> 8 & 0xff))
 	buf.WriteByte(byte(code & 0xff))
+	buf.Write(msg)
 	return ws.sendCtxLocked(ctx, Message{
 		Op:   OpConnectionClose,
 		Data: buf.Bytes(),
