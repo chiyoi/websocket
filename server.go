@@ -104,6 +104,16 @@ func (srv *ServerConfig) handshake(conn net.Conn, r *http.Request) (ws WebSocket
 	return
 }
 
+// IsWsRequest checks the incoming http request to determine whether it's a websocket request.
+func IsWsRequest(r *http.Request) bool {
+	for k, v := range map[string]string{"Upgrade": "websocket", "Connection": "Upgrade", "Sec-WebSocket-Version": "13"} {
+		if got := r.Header.Get(k); got != v {
+			return false
+		}
+	}
+	return true
+}
+
 var DefaultServerConfig = &ServerConfig{}
 
 // Upgrade upgrades the existing http context using DefaultServerConfig.
