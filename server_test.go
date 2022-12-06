@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/chiyoi/websocket/internal/logs"
 )
 
 func TestUpgrade(t *testing.T) {
@@ -13,7 +15,7 @@ func TestUpgrade(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		Info(ws)
+		logs.Info(ws)
 	}))
 	time.Sleep(time.Second * 2)
 
@@ -21,5 +23,5 @@ func TestUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	Info(ws)
+	logs.Info(ws)
 }
