@@ -44,7 +44,7 @@ func (op Opcode) String() (disp string) {
 	case OpBinaryFrame:
 		return "binary frame"
 	case OpConnectionClose:
-		return "connection"
+		return "connection close"
 	case OpPing:
 		return "ping"
 	case OpPong:
@@ -271,6 +271,12 @@ func (ws *webSocket) CloseMsg(msg []byte, code CloseCode) (err error) {
 	defer cancel()
 
 	if err = ws.rmuLockCtx(ctx); err != nil {
+		if timeoutErr, ok := err.(interface{ Timeout() bool }); ok && timeoutErr.Timeout() {
+			if err = cancelRead(ws.conn); err != nil {
+				return
+			}
+			ws.wmu.Lock()
+		}
 		return
 	}
 	defer ws.rmu.Unlock()
@@ -454,9 +460,6 @@ func (ws *webSocket) receive() (msg Message, err error) {
 	case OpTextFrame:
 	case OpBinaryFrame:
 	case OpConnectionClose:
-		if !ws.closing.CompareAndSwap(false, true) {
-			return
-		}
 		defer func() {
 			if closeErr := ws.close(); closeErr != nil {
 				err = closeErr
@@ -468,13 +471,15 @@ func (ws *webSocket) receive() (msg Message, err error) {
 				}
 			}
 		}()
-
 		var p []byte
 		if p, err = ws.readPayload(payloadLen, mask, false); err != nil {
 			return
 		}
-		if err = ws.sendCloseCtx(context.Background(), []byte(NormalClosure.String()), NormalClosure); err != nil {
-			return
+
+		if ws.closing.CompareAndSwap(false, true) {
+			if err = ws.sendCloseCtx(context.Background(), []byte(NormalClosure.String()), NormalClosure); err != nil {
+				return
+			}
 		}
 
 		if payloadLen < 2 {

@@ -12,6 +12,9 @@ import (
 )
 
 func TestPing(t *testing.T) {
+	defer func() {
+		time.Sleep(time.Second * 2)
+	}()
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		ws, err := Upgrade(w, r)
 		if err != nil {
@@ -19,7 +22,8 @@ func TestPing(t *testing.T) {
 			return
 		}
 		defer func() {
-			logs.Info("server close:", ws.CloseMsg([]byte("nyan"), AbnormalClosure))
+			closeErr := ws.CloseMsg([]byte("nyan"), NormalClosure)
+			logs.Info("server close:", closeErr)
 		}()
 		logs.Info("server:", ws.State())
 
@@ -58,7 +62,7 @@ func TestPing(t *testing.T) {
 		rev, err = ws.Recv()
 		if err != nil {
 			if cce, ok := err.(ConnectionCloseError); ok {
-				logs.Info("client close:", string(cce.Msg()))
+				logs.Info("client close:", string(cce.Msg()), cce)
 				return
 			}
 			logs.Error("client error:", err)
