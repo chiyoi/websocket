@@ -114,7 +114,7 @@ func IsWsRequest(r *http.Request) bool {
 	return true
 }
 
-var DefaultServerConfig = &ServerConfig{}
+var DefaultServerConfig = new(ServerConfig)
 
 // Upgrade upgrades the existing http context using DefaultServerConfig.
 func Upgrade(w http.ResponseWriter, r *http.Request) (ws WebSocket, err error) {

@@ -192,7 +192,7 @@ func (d *Dialer) handshake(conn net.Conn, u *urlpkg.URL) (ws WebSocket, err erro
 	return
 }
 
-var DefaultDialer = &Dialer{}
+var DefaultDialer = new(Dialer)
 
 // Dial connects to the url using DefaultDialer.
 func Dial(url string) (ws WebSocket, err error) {
