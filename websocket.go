@@ -287,7 +287,46 @@ func (ws *webSocket) Close() (err error) {
 	return ws.CloseMsg([]byte(NormalClosure.String()), NormalClosure)
 }
 
+func (ws *webSocket) rmuLockCtx(ctx context.Context) (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("read mutex lock: %w", err)
+		}
+	}()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ws.rmu.Lock()
+		select {
+		case <-ctx.Done():
+			ws.rmu.Unlock()
+			return
+		default:
+		}
+	}()
+	select {
+	case <-ctx.Done():
+		return timeoutError{actRecv}
+	case <-done:
+	}
+	return
+}
+
+func (ws *webSocket) RLock() (err error) {
+	defer func() {
+		if _, ok := err.(ConnectionCloseError); err != nil && !ok {
+			err = fmt.Errorf("websocket read lock: %w", err)
+		}
+	}()
+	return ws.rmuLockCtx(context.Background())
+}
+
 func (ws *webSocket) read(length int) (data []byte, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("read: %w", err)
+		}
+	}()
 	if length == 0 {
 		return
 	}
@@ -295,13 +334,20 @@ func (ws *webSocket) read(length int) (data []byte, err error) {
 
 	n, err := ws.conn.Read(data)
 	if n != len(data) || err != nil {
-		err = fmt.Errorf("io error: %d/%d(%w)", n, len(data), err)
+		if err == nil {
+			err = fmt.Errorf("count mismatch: %d/%d", n, len(data))
+		}
 		return
 	}
 	return
 }
 
 func (ws *webSocket) readMetadata() (fin bool, op Opcode, payloadLen int64, mask []byte, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("read metadata: %w", err)
+		}
+	}()
 	metadata, err := ws.read(2)
 	if err != nil {
 		return
@@ -365,6 +411,11 @@ func (ws *webSocket) readMetadata() (fin bool, op Opcode, payloadLen int64, mask
 }
 
 func (ws *webSocket) readPayload(payloadLen int64, mask []byte, verifyUTF8 bool) (data []byte, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("read payload: %w", err)
+		}
+	}()
 	if data, err = ws.read(int(payloadLen)); err != nil {
 		return
 	}
@@ -385,6 +436,11 @@ func (ws *webSocket) readPayload(payloadLen int64, mask []byte, verifyUTF8 bool)
 }
 
 func (ws *webSocket) receive() (msg Message, err error) {
+	defer func() {
+		if _, ok := err.(ConnectionCloseError); err != nil && !ok {
+			err = fmt.Errorf("receive: %w", err)
+		}
+	}()
 	fin, op, payloadLen, mask, err := ws.readMetadata()
 	if err != nil {
 		return
@@ -468,26 +524,6 @@ func (ws *webSocket) receive() (msg Message, err error) {
 	return
 }
 
-func (ws *webSocket) rmuLockCtx(ctx context.Context) (err error) {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ws.rmu.Lock()
-		select {
-		case <-ctx.Done():
-			ws.rmu.Unlock()
-			return
-		default:
-		}
-	}()
-	select {
-	case <-ctx.Done():
-		return timeoutError{actRecv}
-	case <-done:
-	}
-	return
-}
-
 func (ws *webSocket) recvCtxLocked(ctx context.Context) (msg Message, err error) {
 	done := make(chan struct{})
 	go func() {
@@ -511,7 +547,7 @@ func (ws *webSocket) recvCtxLocked(ctx context.Context) (msg Message, err error)
 func (ws *webSocket) RecvCtx(ctx context.Context) (msg Message, err error) {
 	defer func() {
 		if _, ok := err.(ConnectionCloseError); err != nil && !ok {
-			err = fmt.Errorf("websocket: receive error: %w", err)
+			err = fmt.Errorf("websocket receive: %w", err)
 		}
 	}()
 	if ws.State() != Open || ws.closing.Load() {
@@ -529,25 +565,73 @@ func (ws *webSocket) RecvCtx(ctx context.Context) (msg Message, err error) {
 	defer ws.rmu.Unlock()
 	return ws.recvCtxLocked(ctx)
 }
+
 func (ws *webSocket) Recv() (data []byte, err error) {
 	msg, err := ws.RecvCtx(context.Background())
 	data = msg.Data
 	return
 }
 
+func (ws *webSocket) wmuLockCtx(ctx context.Context) (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("write mutex lock: %w", err)
+		}
+	}()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ws.wmu.Lock()
+		select {
+		case <-ctx.Done():
+			ws.wmu.Unlock()
+			return
+		default:
+		}
+	}()
+	select {
+	case <-ctx.Done():
+		err = timeoutError{actSend}
+		return
+	case <-done:
+	}
+	return
+}
+
+func (ws *webSocket) WLock() (err error) {
+	defer func() {
+		if _, ok := err.(ConnectionCloseError); err != nil && !ok {
+			err = fmt.Errorf("websocket write lock: %w", err)
+		}
+	}()
+	return ws.wmuLockCtx(context.Background())
+}
+
 func (ws *webSocket) write(b []byte) (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("write: %w", err)
+		}
+	}()
 	if len(b) == 0 {
 		return
 	}
 
 	n, err := ws.conn.Write(b)
 	if n != len(b) || err != nil {
-		err = fmt.Errorf("write error: %d/%d(%w)", n, len(b), err)
+		if err == nil {
+			err = fmt.Errorf("write count mismatch: %d/%d", n, len(b))
+		}
 		return
 	}
 	return
 }
-func (ws *webSocket) bufMetadata(buf *bytes.Buffer, fin bool, op Opcode, payload int) (mask []byte) {
+func (ws *webSocket) bufMetadata(buf *bytes.Buffer, fin bool, op Opcode, payload int) (mask []byte, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("buffer metadata: %w", err)
+		}
+	}()
 	var metadata []byte
 	switch {
 	case payload <= 125:
@@ -575,8 +659,8 @@ func (ws *webSocket) bufMetadata(buf *bytes.Buffer, fin bool, op Opcode, payload
 
 	if !ws.srv {
 		mask = make([]byte, 4)
-		if _, err := rand.Read(mask); err != nil {
-			panic("websocket: random mask failed:" + err.Error())
+		if _, err = rand.Read(mask); err != nil {
+			return
 		}
 		buf.Write(mask)
 	}
@@ -594,6 +678,11 @@ func (ws *webSocket) bufPayload(buf *bytes.Buffer, data []byte, mask []byte) {
 }
 
 func (ws *webSocket) send(op Opcode, data []byte) (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("send: %w", err)
+		}
+	}()
 	switch op {
 	case OpContinuationFrame:
 		return errors.New("continuation frame as the first frame")
@@ -608,7 +697,10 @@ func (ws *webSocket) send(op Opcode, data []byte) (err error) {
 		var segment []byte
 		split := int(math.Min(float64(len(data)), float64(MaximumSegmentSize)))
 		segment, data = data[:split], data[split:]
-		mask := ws.bufMetadata(&buf, len(data) == 0, op, len(segment))
+		var mask []byte
+		if mask, err = ws.bufMetadata(&buf, len(data) == 0, op, len(segment)); err != nil {
+			return
+		}
 		ws.bufPayload(&buf, segment, mask)
 		if err = ws.write(buf.Bytes()); err != nil {
 			return
@@ -618,7 +710,10 @@ func (ws *webSocket) send(op Opcode, data []byte) (err error) {
 			buf.Reset()
 			split = int(math.Min(float64(len(data)), float64(MaximumSegmentSize)))
 			segment, data = data[:split], data[split:]
-			mask = ws.bufMetadata(&buf, len(data) == 0, OpContinuationFrame, len(segment))
+			var mask []byte
+			if mask, err = ws.bufMetadata(&buf, len(data) == 0, OpContinuationFrame, len(segment)); err != nil {
+				return
+			}
 			ws.bufPayload(&buf, segment, mask)
 			if err = ws.write(buf.Bytes()); err != nil {
 				return
@@ -632,34 +727,16 @@ func (ws *webSocket) send(op Opcode, data []byte) (err error) {
 		}
 
 		var buf bytes.Buffer
-		mask := ws.bufMetadata(&buf, true, op, len(data))
+		var mask []byte
+		if mask, err = ws.bufMetadata(&buf, true, op, len(data)); err != nil {
+			return
+		}
 		ws.bufPayload(&buf, data, mask)
 		return ws.write(buf.Bytes())
 
 	default:
 		return errors.New("invalid opcode")
 	}
-}
-
-func (ws *webSocket) wmuLockCtx(ctx context.Context) (err error) {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ws.wmu.Lock()
-		select {
-		case <-ctx.Done():
-			ws.wmu.Unlock()
-			return
-		default:
-		}
-	}()
-	select {
-	case <-ctx.Done():
-		err = timeoutError{actSend}
-		return
-	case <-done:
-	}
-	return
 }
 
 func (ws *webSocket) sendCtxLocked(ctx context.Context, msg Message) (err error) {
@@ -685,7 +762,7 @@ func (ws *webSocket) sendCtxLocked(ctx context.Context, msg Message) (err error)
 func (ws *webSocket) SendCtx(ctx context.Context, msg Message) (err error) {
 	defer func() {
 		if _, ok := err.(ConnectionCloseError); err != nil && !ok {
-			err = fmt.Errorf("websocket: send error: %w", err)
+			err = fmt.Errorf("websocket send: %w", err)
 		}
 	}()
 	if ws.State() != Open || ws.closing.Load() {
@@ -718,6 +795,11 @@ func (ws *webSocket) SendText(txt string) (err error) {
 }
 
 func (ws *webSocket) sendCloseCtx(ctx context.Context, msg []byte, code CloseCode) (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("send close: %w", err)
+		}
+	}()
 	if err = ws.wmuLockCtx(ctx); err != nil {
 		return
 	}
@@ -733,6 +815,11 @@ func (ws *webSocket) sendCloseCtx(ctx context.Context, msg []byte, code CloseCod
 }
 
 func (ws *webSocket) Ping() (resp []byte, err error) {
+	defer func() {
+		if _, ok := err.(ConnectionCloseError); err != nil && !ok {
+			err = fmt.Errorf("websocket ping: %w", err)
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
 
@@ -756,6 +843,11 @@ func (ws *webSocket) Ping() (resp []byte, err error) {
 }
 
 func (ws *webSocket) pong() (err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("pong: %w", err)
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
 	return ws.SendCtx(ctx, Message{
